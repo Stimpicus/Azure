@@ -17,12 +17,11 @@ Grants an Entra ID app registration access to **one** SharePoint site through th
 
 | Variable | Meaning |
 |---|---|
-| `$cred` | Your admin credentials (prompted via `Get-Credential`) |
 | `$appGuid` | App registration **Application (client) ID**. An Object ID is detected and converted |
 | `$siteGuid` | SharePoint **site collection ID** |
 | `$perm` | `Read` or `ReadWrite` (`Read/Write`, `RW` and `Write` are also accepted) |
 
-Anything not passed as a parameter is prompted for.
+Anything not passed as a parameter is prompted for. No credentials are captured. Sign-in happens in the browser (see below).
 
 ### Requirements
 
@@ -47,7 +46,7 @@ Anything not passed as a parameter is prompted for.
 ### Safety behaviour
 
 - All input is validated before the script connects to anything.
-- The Graph sign-in must match the credential's UPN and hold every required scope, or the script stops.
+- The Graph sign-in must be a delegated user sign-in holding every required scope, or the script stops. That account is the one elevated and cleaned up.
 - Locked sites (ReadOnly or NoAccess) are refused.
 - A plan showing the current state must be confirmed before any change. `-WhatIf` gives a dry run.
 - Idempotent: existing grants are detected and left alone. An existing app permission on the site is changed to the requested role, and the plan warns when that is a downgrade from `fullcontrol` or `owner`.
@@ -61,9 +60,9 @@ Anything not passed as a parameter is prompted for.
 
 The script's flow has been tested end-to-end against stubbed Graph and SharePoint cmdlets in five scenarios: a fresh grant, an idempotent re-run with a role change, failure at step 3 (the temporary admin right is still removed), SharePoint read failure (aborts before any change), and `-WhatIf`. It has **not** yet been run against a live tenant. Try it with `-WhatIf` on a test site first.
 
-### MFA note
+### Sign-in
 
-Microsoft Graph PowerShell cannot sign a user in with a username and password, so the Graph sign-in is always interactive. `$cred` identifies the account and verifies the Graph session. It's also passed to `Connect-SPOService`, but that fails for MFA-enabled accounts, and the script then falls back to an interactive SharePoint sign-in.
+There are two interactive browser sign-ins, both supporting MFA: Microsoft Graph first, then SharePoint Online admin. **Use the same account for both.** The script reads the Graph account and uses it as the admin to elevate. It can't read back which account signed in to SharePoint, so it can't check that the two match.
 
 ### Undo
 

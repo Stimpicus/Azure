@@ -14,9 +14,9 @@
          attempted even if steps 2-3 fail or the script is interrupted with Ctrl+C.
 
     Safety behaviour:
-      - All inputs are validated (GUID format, UPN format, permission value) before anything connects.
-      - The Graph session must be signed in as the same account as the supplied credentials, with every
-        required scope, or the script stops.
+      - All inputs are validated (GUID format, permission value) before anything connects.
+      - The Graph session must be a delegated user sign-in holding every required scope, or the script stops.
+        The account signed in to Graph is the account that is elevated and then cleaned up.
       - The site is resolved by GUID and the match is checked, and locked sites (ReadOnly/NoAccess) are refused.
       - A full plan, including the current state, is shown and must be confirmed before any change.
         Use -WhatIf for a dry run (reads only, no changes) or -Confirm:$false to skip the prompt.
@@ -24,10 +24,6 @@
       - Step 4 only removes the admin right if this script added it. If you were already a Site Collection
         Administrator before the run, that pre-existing access is left untouched.
       - Every run is logged to a transcript in -LogDirectory.
-
-.PARAMETER cred
-    Your administrator credentials. Prompted for if omitted. The UPN identifies the account to elevate and
-    is checked against the Graph sign-in. See NOTES on MFA.
 
 .PARAMETER appGuid
     The Application (client) ID of the app registration. If you pass the app's Object ID instead, the
@@ -69,17 +65,14 @@
       - Delegated Graph scopes, consented at sign-in: Application.ReadWrite.All,
         AppRoleAssignment.ReadWrite.All, Sites.FullControl.All.
 
-    About credentials and MFA:
-      Microsoft Graph PowerShell does not accept a username and password for a user sign-in, so Graph always
-      opens an interactive (modern auth) sign-in. $cred is used to identify the account, to verify the Graph
-      sign-in matches it, and for Connect-SPOService. Connect-SPOService -Credential fails for accounts that
-      require MFA (which should include every Global Administrator). When it fails, the script falls back to
-      an interactive SharePoint sign-in, and you sign in again as the same account.
+    Sign-in:
+      No credentials are captured. The script opens two interactive (modern auth, MFA-capable) browser
+      sign-ins: Microsoft Graph first, then SharePoint Online admin. Use the same account for both. The
+      SharePoint sign-in account cannot be read back, so the script cannot verify that it matches.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
-    [System.Management.Automation.PSCredential]$cred,
     [string]$appGuid,
     [string]$siteGuid,
     [string]$perm,
@@ -232,15 +225,6 @@ try {
     #region Step 0: Gather and validate input (nothing connects until all input is valid)
     Write-Step 'Collecting input'
 
-    if (-not $cred) {
-        $cred = Get-Credential -Message 'Sign-in for the Global Administrator who will perform this change (UPN and password)'
-    }
-    if (-not $cred -or [string]::IsNullOrWhiteSpace($cred.UserName)) { throw 'No credentials were supplied.' }
-    $userUpn = $cred.UserName.Trim()
-    if ($userUpn -notmatch '^[^@\s\\]+@[^@\s]+\.[^@\s]+$') {
-        throw "'$userUpn' is not a UPN (user@domain). Use your Entra ID sign-in name, not DOMAIN\user."
-    }
-
     $appGuid  = Read-GuidValue -Prompt 'App registration Application (client) ID' -Value $appGuid
     $siteGuid = Read-GuidValue -Prompt 'SharePoint site collection ID'            -Value $siteGuid
 
@@ -272,15 +256,17 @@ try {
     #endregion
 
     #region Connect to Microsoft Graph and verify the session
-    Write-Step "Connecting to Microsoft Graph (sign in as $userUpn)"
+    Write-Step 'Connecting to Microsoft Graph (a browser sign-in will open)'
     # Process scope keeps this session separate from any cached Graph session for another account.
     Connect-MgGraph -Scopes $GraphScopes -ContextScope Process -NoWelcome
     $graphConnected = $true
 
     $context = Get-MgContext
     if (-not $context -or -not $context.Account) { throw 'Graph connection did not return a signed-in account.' }
-    if ($context.Account -ne $userUpn) {
-        throw "Graph is signed in as '$($context.Account)', but the credentials are for '$userUpn'. Sign in as the same account."
+    # The signed-in account is the one elevated in step 1 and cleaned up in step 4.
+    $userUpn = $context.Account
+    if ($userUpn -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+        throw "Graph returned '$userUpn', which is not a user principal name. A delegated user sign-in is required."
     }
     $missingScopes = @($GraphScopes | Where-Object { $context.Scopes -notcontains $_ })
     if ($missingScopes.Count -gt 0) {
@@ -378,14 +364,8 @@ try {
     $existingRoles = @(if ($existingSitePerm) { $existingSitePerm['roles'] })
 
     # Connect to SharePoint Online admin to check and manage Site Collection Administrators.
-    Write-Step "Connecting to SharePoint Online admin ($AdminUrl)"
-    try {
-        Connect-SPOService -Url $AdminUrl -Credential $cred
-    }
-    catch {
-        Write-Warning "Credential sign-in to SharePoint failed ($($_.Exception.Message.Trim())). This is expected for MFA-enabled accounts. Opening interactive sign-in; sign in as $userUpn."
-        Connect-SPOService -Url $AdminUrl
-    }
+    Write-Step "Connecting to SharePoint Online admin ($AdminUrl) - sign in as $userUpn in the browser prompt"
+    Connect-SPOService -Url $AdminUrl
     $spoConnected = $true
 
     $spoSite = Get-SPOSite -Identity $siteUrl
